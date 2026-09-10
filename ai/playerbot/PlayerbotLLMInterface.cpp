@@ -15,6 +15,7 @@ INSTANTIATE_SINGLETON_1(PlayerbotLLMInterface);
 #include <chrono>
 #include <openssl/ssl.h>
 #include <openssl/err.h>
+#include <atomic>
 #include <thread>
 #include "Log.h"
 #include "PlayerbotAIConfig.h"
@@ -373,13 +374,170 @@ std::string GetSSLError() {
     return std::string(err_buf);
 }
 
-std::string PlayerbotLLMInterface::Generate(const std::string& prompt, int timeOutSeconds, int maxGenerations, std::vector<std::string> & debugLines) {
-    // LLM gateway network client removed. Always report "no response" so callers fall back
-    // to their existing silent/no-op reply path.
-    (void)prompt; (void)timeOutSeconds; (void)maxGenerations;
+// --- turtle: minimal plain-HTTP client restored for the LLM gateway ---
+// The upstream fork ships a stub (Generate() returns {}). Ollama's OpenAI-compatible
+// endpoint is plain HTTP, so a dependency-free blocking POST is enough. TLS (https://)
+// is intentionally not supported here; point AiPlayerbot.LLMApiEndpoint at http://.
+static std::atomic<int> g_llmActiveGenerations{0};
+
+static bool ParseHttpEndpoint(const std::string& url, std::string& host, uint16_t& port, std::string& path)
+{
+    const std::string https = "https://";
+    const std::string http = "http://";
+    std::string u = url;
+    if (u.rfind(https, 0) == 0)
+        return false; // TLS not supported by this simple client
+    if (u.rfind(http, 0) == 0)
+        u = u.substr(http.size());
+    std::string hostport;
+    std::string::size_type slash = u.find('/');
+    if (slash == std::string::npos) { hostport = u; path = "/"; }
+    else { hostport = u.substr(0, slash); path = u.substr(slash); }
+    std::string::size_type colon = hostport.find(':');
+    if (colon == std::string::npos) { host = hostport; port = 80; }
+    else { host = hostport.substr(0, colon); port = (uint16_t)atoi(hostport.substr(colon + 1).c_str()); }
+    return !host.empty();
+}
+
+std::string PlayerbotLLMInterface::Generate(const std::string& prompt, int timeOutSeconds, int maxGenerations, std::vector<std::string>& debugLines)
+{
+    std::string host, path;
+    uint16_t port = 80;
+    if (!ParseHttpEndpoint(sPlayerbotAIConfig.llmApiEndpoint, host, port, path))
+    {
+        if (!debugLines.empty())
+            debugLines.push_back("LLM: endpoint empty or not plain http:// -> " + sPlayerbotAIConfig.llmApiEndpoint);
+        return {};
+    }
+
+    if (timeOutSeconds <= 0) timeOutSeconds = 30;
+    if (maxGenerations < 1) maxGenerations = 1;
+
+    // Cap concurrent generations (waits up to the timeout for a free slot).
+    auto waitStart = std::chrono::steady_clock::now();
+    while (g_llmActiveGenerations.load() >= maxGenerations)
+    {
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        if (std::chrono::duration_cast<std::chrono::seconds>(std::chrono::steady_clock::now() - waitStart).count() >= timeOutSeconds)
+        {
+            if (!debugLines.empty())
+                debugLines.push_back("LLM: timed out waiting for a free generation slot");
+            return {};
+        }
+    }
+    g_llmActiveGenerations.fetch_add(1);
+    struct SlotGuard { ~SlotGuard() { g_llmActiveGenerations.fetch_sub(1); } } slotGuard;
+
+    int sock = ::socket(AF_INET, SOCK_STREAM, 0);
+    if (sock < 0)
+    {
+        if (!debugLines.empty()) debugLines.push_back("LLM: socket() failed");
+        return {};
+    }
+
+    struct timeval tv;
+    tv.tv_sec = timeOutSeconds;
+    tv.tv_usec = 0;
+    setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, (const char*)&tv, sizeof(tv));
+    setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, (const char*)&tv, sizeof(tv));
+
+    struct sockaddr_in addr;
+    memset(&addr, 0, sizeof(addr));
+    addr.sin_family = AF_INET;
+    addr.sin_port = htons(port);
+    if (inet_pton(AF_INET, host.c_str(), &addr.sin_addr) != 1)
+    {
+        struct addrinfo hints;
+        memset(&hints, 0, sizeof(hints));
+        hints.ai_family = AF_INET;
+        hints.ai_socktype = SOCK_STREAM;
+        struct addrinfo* res = nullptr;
+        if (getaddrinfo(host.c_str(), nullptr, &hints, &res) != 0 || !res)
+        {
+            ::close(sock);
+            if (!debugLines.empty()) debugLines.push_back("LLM: DNS resolve failed for " + host);
+            return {};
+        }
+        addr.sin_addr = ((struct sockaddr_in*)res->ai_addr)->sin_addr;
+        freeaddrinfo(res);
+    }
+
+    if (::connect(sock, (struct sockaddr*)&addr, sizeof(addr)) < 0)
+    {
+        ::close(sock);
+        if (!debugLines.empty()) debugLines.push_back("LLM: connect() failed to " + host);
+        return {};
+    }
+
+    std::ostringstream req;
+    req << "POST " << path << " HTTP/1.1\r\n"
+        << "Host: " << host << ":" << port << "\r\n"
+        << "Content-Type: application/json\r\n";
+    if (!sPlayerbotAIConfig.llmApiKey.empty())
+        req << "Authorization: Bearer " << sPlayerbotAIConfig.llmApiKey << "\r\n";
+    req << "Content-Length: " << prompt.size() << "\r\n"
+        << "Connection: close\r\n\r\n"
+        << prompt;
+    const std::string reqStr = req.str();
+
+    size_t sent = 0;
+    while (sent < reqStr.size())
+    {
+        ssize_t n = ::send(sock, reqStr.data() + sent, reqStr.size() - sent, 0);
+        if (n <= 0)
+        {
+            ::close(sock);
+            if (!debugLines.empty()) debugLines.push_back("LLM: send() failed");
+            return {};
+        }
+        sent += (size_t)n;
+    }
+
+    std::string response;
+    char buf[4096];
+    for (;;)
+    {
+        ssize_t n = ::recv(sock, buf, sizeof(buf), 0);
+        if (n > 0) response.append(buf, (size_t)n);
+        else break;
+    }
+    ::close(sock);
+
+    // Split HTTP headers from body.
+    std::string headers, body;
+    std::string::size_type sep = response.find("\r\n\r\n");
+    if (sep == std::string::npos) { body = response; }
+    else { headers = response.substr(0, sep); body = response.substr(sep + 4); }
+
+    // Minimal de-chunking for Transfer-Encoding: chunked (Ollama non-stream normally
+    // uses Content-Length, but be safe).
+    std::string hlow = headers;
+    for (auto& c : hlow) c = (char)tolower((unsigned char)c);
+    if (hlow.find("transfer-encoding: chunked") != std::string::npos)
+    {
+        std::string decoded;
+        std::string::size_type pos = 0;
+        while (pos < body.size())
+        {
+            std::string::size_type eol = body.find("\r\n", pos);
+            if (eol == std::string::npos) break;
+            std::string sizeHex = body.substr(pos, eol - pos);
+            unsigned long chunkSize = strtoul(sizeHex.c_str(), nullptr, 16);
+            if (chunkSize == 0) break;
+            pos = eol + 2;
+            if (pos + chunkSize > body.size()) break;
+            decoded.append(body, pos, chunkSize);
+            pos += chunkSize + 2; // skip chunk + trailing CRLF
+        }
+        body = decoded;
+    }
+
     if (!debugLines.empty())
-        debugLines.push_back("LLM generation disabled in this build");
-    return {};
+    {
+        debugLines.push_back("LLM request: " + prompt);
+        debugLines.push_back("LLM response body: " + body);
+    }
+    return body;
 }
 
 inline std::string extractAfterPattern(const std::string& content, const std::string& startPattern) {
