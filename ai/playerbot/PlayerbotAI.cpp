@@ -1766,7 +1766,7 @@ void PlayerbotAI::HandleBotOutgoingPacket(const WorldPacket& packet)
                     }
                 }
 
-                bool isMentioned = message.find(bot->GetName()) != std::string::npos;
+                bool isMentioned = (msgtype == CHAT_MSG_WHISPER) || message.find(bot->GetName()) != std::string::npos; // whisper is always directed at the bot
 
 
                 ChatChannelSource chatChannelSource = GetChatChannelSource(bot, msgtype, chanName);
