@@ -1,3 +1,4 @@
+#include <vector>
 #include "BotManager.h"
 #include "PlayerbotAIAdapter.h"
 #include "PlayerbotAIStorage.h"
@@ -806,9 +807,21 @@ void BotManager::SetPacketBridgeTestEnabled(bool enable, uint32_t accountId,
 
 void BotManager::UpdateBots(uint32_t diff)
 {
+    // An AI Update() below can log a bot out or hand it to a network client,
+    // which calls RemoveBot -> m_bots.erase mid-loop; a range-for iterator would
+    // then be invalidated (SIGSEGV in UpdateBots). Iterate a snapshot of keys and
+    // re-lookup each entry so a removal during Update cannot invalidate our position.
+    std::vector<uint32_t> updateKeys;
+    updateKeys.reserve(m_bots.size());
     for (auto& kv : m_bots)
+        updateKeys.push_back(kv.first);
+
+    for (uint32_t updateKey : updateKeys)
     {
-        BotEntry& entry = kv.second;
+        auto it = m_bots.find(updateKey);
+        if (it == m_bots.end())
+            continue;
+        BotEntry& entry = it->second;
         if (entry.record.lifecycle != BotLifecycle::InWorld)
             continue;
 
