@@ -169,7 +169,7 @@ bool PlayerbotAIConfig::Initialize()
     sightDistance = config.GetFloatDefault("AiPlayerbot.SightDistance", 75.0f);
     spellDistance = config.GetFloatDefault("AiPlayerbot.SpellDistance", 25.0f);
     shootDistance = config.GetFloatDefault("AiPlayerbot.ShootDistance", 25.0f);
-    // 125 was three times the reach of any heal in this Vanilla/Turtle realm, and it fed
+    // 125 was three times the reach of any heal in this Vanilla/Tortoise realm, and it fed
     // target selection, the out-of-range trigger and the approach action alike -
     // so a healer sixty yards away believed it was in position, never closed the
     // gap, and every cast failed.
@@ -238,6 +238,15 @@ bool PlayerbotAIConfig::Initialize()
 
     iterationsPerTick = config.GetIntDefault("AiPlayerbot.IterationsPerTick", 100);
 
+    // Issue #84: donor Shyalya defaults (base 250ms doubling to 2s cap,
+    // 30s TTL, 64 entries). Zero base/max disables the backoff entirely.
+    failedActionRetryBaseMs = uint32(std::max(0, std::min(2000, config.GetIntDefault("AiPlayerbot.FailedActionRetryBase", 250))));
+    failedActionRetryMaxMs = uint32(std::max(0, std::min(10000, config.GetIntDefault("AiPlayerbot.FailedActionRetryMax", 2000))));
+    if (failedActionRetryBaseMs && failedActionRetryMaxMs)
+        failedActionRetryMaxMs = std::max(failedActionRetryBaseMs, failedActionRetryMaxMs);
+    failedActionCacheTtlMs = uint32(std::max(1000, std::min(300000, config.GetIntDefault("AiPlayerbot.FailedActionCacheTtl", 30000))));
+    failedActionCacheMaxEntries = uint32(std::max(1, std::min(256, config.GetIntDefault("AiPlayerbot.FailedActionCacheMaxEntries", 64))));
+
     allowGuildBots = config.GetBoolDefault("AiPlayerbot.AllowGuildBots", true);
     allowMultiAccountAltBots = config.GetBoolDefault("AiPlayerbot.AllowMultiAccountAltBots", true);
 
@@ -297,6 +306,9 @@ bool PlayerbotAIConfig::Initialize()
     LoadList<std::list<uint32> >(config.GetStringDefault("AiPlayerbot.VendorOverAHItemIds", ""), vendorOverAHItemIds);
     botCheckAllAuctionListings = config.GetBoolDefault("AiPlayerbot.BotCheckAllAuctionListings", false);
     botsSaveEpics = config.GetBoolDefault("AiPlayerbot.BotsSaveEpics", true);
+    auctionPriceRefreshInterval = (uint32)config.GetIntDefault("AiPlayerbot.AuctionPriceRefreshInterval", 60);
+    if (auctionPriceRefreshInterval < 5) auctionPriceRefreshInterval = 5;
+    if (auctionPriceRefreshInterval > 3600) auctionPriceRefreshInterval = 3600;
     // Default-off bounded AH market population. Interval is seconds, batch is
     // max auctions per tick (hard capped at 5 in service). No AH scan or DB
     // query per tick; uses legitimate inventory + native HandleAuctionSellItem.
@@ -306,6 +318,48 @@ bool PlayerbotAIConfig::Initialize()
     if (ahMarketInterval > 3600) ahMarketInterval = 3600;
     ahMarketBatchSize = (uint32)config.GetIntDefault("AiPlayerbot.AhMarketBatchSize", 1);
     if (ahMarketBatchSize > 5) ahMarketBatchSize = 5;
+    // Synthetic AH Supply and Buyer Engine with Work Budgets (Issue #88)
+    ahMarketSyntheticSupply = config.GetBoolDefault("AiPlayerbot.AhMarketSyntheticSupply", false);
+    ahMarketBuyer = config.GetBoolDefault("AiPlayerbot.AhMarketBuyer", false);
+    ahMarketBudgetUs = (uint32)config.GetIntDefault("AiPlayerbot.AhMarketBudgetUs", 2000);
+    if (ahMarketBudgetUs < 100) ahMarketBudgetUs = 100;
+    if (ahMarketBudgetUs > 20000) ahMarketBudgetUs = 20000;
+    ahMarketMaxOperations = (uint32)config.GetIntDefault("AiPlayerbot.AhMarketMaxOperations", 32);
+    if (ahMarketMaxOperations < 1) ahMarketMaxOperations = 1;
+    if (ahMarketMaxOperations > 256) ahMarketMaxOperations = 256;
+    ahMarketChanceSell = (uint32)config.GetIntDefault("AiPlayerbot.AhMarketChanceSell", 10);
+    if (ahMarketChanceSell > 100) ahMarketChanceSell = 100;
+    ahMarketChanceBuy = (uint32)config.GetIntDefault("AiPlayerbot.AhMarketChanceBuy", 10);
+    if (ahMarketChanceBuy > 100) ahMarketChanceBuy = 100;
+    ahMarketBuyValue = (uint32)config.GetIntDefault("AiPlayerbot.AhMarketBuyValue", 80);
+    if (ahMarketBuyValue > 200) ahMarketBuyValue = 200;
+    ahMarketMaxSpendPerBot = (uint32)config.GetIntDefault("AiPlayerbot.AhMarketMaxSpendPerBot", 0);
+    ahMarketMaxQuality = (uint32)config.GetIntDefault("AiPlayerbot.AhMarketMaxQuality", 4);
+    if (ahMarketMaxQuality > 6) ahMarketMaxQuality = 6;
+    ahMarketMaxLevel = (uint32)config.GetIntDefault("AiPlayerbot.AhMarketMaxLevel", 60);
+    if (ahMarketMaxLevel < 1) ahMarketMaxLevel = 1;
+    if (ahMarketMaxLevel > 60) ahMarketMaxLevel = 60;
+    ahMarketDynamicLevel = config.GetBoolDefault("AiPlayerbot.AhMarketDynamicLevel", false);
+    ahMarketLevelRefresh = (uint32)config.GetIntDefault("AiPlayerbot.AhMarketLevelRefresh", 600);
+    if (ahMarketLevelRefresh < 60) ahMarketLevelRefresh = 60;
+    if (ahMarketLevelRefresh > 86400) ahMarketLevelRefresh = 86400;
+    ahMarketVariance = (uint32)config.GetIntDefault("AiPlayerbot.AhMarketVariance", 10);
+    if (ahMarketVariance > 100) ahMarketVariance = 100;
+    ahMarketBidMin = (uint32)config.GetIntDefault("AiPlayerbot.AhMarketBidMin", 75);
+    if (ahMarketBidMin < 1) ahMarketBidMin = 1;
+    if (ahMarketBidMin > 100) ahMarketBidMin = 100;
+    ahMarketBidMax = (uint32)config.GetIntDefault("AiPlayerbot.AhMarketBidMax", 90);
+    if (ahMarketBidMax < 1) ahMarketBidMax = 1;
+    if (ahMarketBidMax > 100) ahMarketBidMax = 100;
+    if (ahMarketBidMin > ahMarketBidMax) ahMarketBidMin = ahMarketBidMax;
+    ahMarketTimeMin = (uint32)config.GetIntDefault("AiPlayerbot.AhMarketTimeMin", 8);
+    if (ahMarketTimeMin < 1) ahMarketTimeMin = 1;
+    if (ahMarketTimeMin > 72) ahMarketTimeMin = 72;
+    ahMarketTimeMax = (uint32)config.GetIntDefault("AiPlayerbot.AhMarketTimeMax", 24);
+    if (ahMarketTimeMax < 1) ahMarketTimeMax = 1;
+    if (ahMarketTimeMax > 72) ahMarketTimeMax = 72;
+    if (ahMarketTimeMin > ahMarketTimeMax) ahMarketTimeMin = ahMarketTimeMax;
+    ahMarketValueVendor = config.GetBoolDefault("AiPlayerbot.AhMarketValueVendor", true);
     //
     logInGroupOnly = config.GetBoolDefault("AiPlayerbot.LogInGroupOnly", true);
     logValuesPerTick = config.GetBoolDefault("AiPlayerbot.LogValuesPerTick", false);
@@ -357,7 +411,7 @@ bool PlayerbotAIConfig::Initialize()
     auto isAvailableRace = [](uint8 cls, uint8 race)
     {
         // Character creation is the authoritative class/race contract. This
-        // includes Turtle rows such as Goblin and High Elf and avoids making
+        // includes Tortoise rows such as Goblin and High Elf and avoids making
         // the bot module maintain a second expansion-specific matrix.
         return sObjectMgr.GetPlayerInfo(race, cls) != nullptr;
     };
@@ -534,6 +588,9 @@ bool PlayerbotAIConfig::Initialize()
     randomBotGuildNearby = config.GetBoolDefault("AiPlayerbot.RandomBotGuildNearby", true);
     inviteChat = config.GetBoolDefault("AiPlayerbot.InviteChat", true);
     botsSilent = config.GetBoolDefault("AiPlayerbot.BotsSilent", false);
+    observability = config.GetBoolDefault("AiPlayerbot.Observability", false);
+    observabilityPort = static_cast<uint32>(config.GetIntDefault("AiPlayerbot.ObservabilityPort", 0));
+    observabilityHost = config.GetStringDefault("AiPlayerbot.ObservabilityHost", "");
     enableActionLog = config.GetBoolDefault("AiPlayerbot.EnableActionLog", false);
     botLogFile = config.GetStringDefault("AiPlayerbot.BotLogFile", "bots.log");
     {
@@ -641,7 +698,7 @@ bool PlayerbotAIConfig::Initialize()
     autoDoQuests = config.GetBoolDefault("AiPlayerbot.AutoDoQuests", true);
     generateTravelNodes = config.GetBoolDefault("AiPlayerbot.GenerateTravelNodes", false);
     generateFishLocations = config.GetBoolDefault("AiPlayerbot.GenerateFishLocations", false);
-    asyncTravelPartitions = config.GetBoolDefault("AiPlayerbot.AsyncTravelPartitions", true); // false = travel/terrain lookups on main thread only (crash-safe on cores without concurrent terrain load)
+    asyncTravelPartitions = config.GetBoolDefault("AiPlayerbot.AsyncTravelPartitions", false); // false = travel/terrain lookups on main thread only (crash-safe on cores without concurrent terrain load)
     if (generateTravelNodes || generateFishLocations)
     {
         sLog.outError("TortoiseBots: travel/fish cache generation is disabled because the pinned core PathInfo has no area query or avoidance filter; use persisted caches or direct movement/fishing.");
@@ -679,9 +736,9 @@ bool PlayerbotAIConfig::Initialize()
     llmMaxSimultaniousGenerations = config.GetIntDefault("AiPlayerbot.LLMMaxSimultaniousGenerations", 100);
 
 
-    llmPrePrompt = config.GetStringDefault("AiPlayerbot.LLMPrePrompt", "You are a roleplaying character in Vanilla/Turtle WoW 1.18.1. Your name is <bot name>. The <other type> <other name> is speaking to you <channel name> and is an <other gender> <other race> <other class> of level <other level>. You are level <bot level> and play as a <bot gender> <bot race> <bot class> that is currently in <bot subzone> <bot zone>. Answer as a roleplaying character. Limit responses to 100 characters.");
+    llmPrePrompt = config.GetStringDefault("AiPlayerbot.LLMPrePrompt", "You are a roleplaying character in Tortoise 1.18.1 Core from Penqle. Your name is <bot name>. The <other type> <other name> is speaking to you <channel name> and is an <other gender> <other race> <other class> of level <other level>. You are level <bot level> and play as a <bot gender> <bot race> <bot class> that is currently in <bot subzone> <bot zone>. Answer as a roleplaying character. Limit responses to 100 characters.");
 
-    llmPreRpgPrompt = config.GetStringDefault("AiPlayerbot.LLMRpgPrompt", "In Vanilla/Turtle WoW 1.18.1 in <bot zone> <bot subzone> stands <bot type> <bot name> a level <bot level> <bot gender> <bot race> <bot class>."
+    llmPreRpgPrompt = config.GetStringDefault("AiPlayerbot.LLMRpgPrompt", "In Tortoise 1.18.1 Core from Penqle in <bot zone> <bot subzone> stands <bot type> <bot name> a level <bot level> <bot gender> <bot race> <bot class>."
         " Standing nearby is <unit type> <unit name> <unit subname> a level <unit level> <unit gender> <unit race> <unit faction> <unit class>. Answer as a roleplaying character. Limit responses to 100 characters.");
 
 
@@ -1261,7 +1318,7 @@ void PlayerbotAIConfig::LoadTalentSpecs()
     else
     {
         if (maxSpecLevel < DEFAULT_MAX_LEVEL && randomBotMaxLevel < DEFAULT_MAX_LEVEL)
-            sLog.outErrorDb("!!!!!!!!!!! randomBotMaxLevel and the talent specs are below the Vanilla/Turtle level cap. Please check the configuration.");
+            sLog.outErrorDb("!!!!!!!!!!! randomBotMaxLevel and the talent specs are below the Vanilla/Tortoise level cap. Please check the configuration.");
 
     }
 }

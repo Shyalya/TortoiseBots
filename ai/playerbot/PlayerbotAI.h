@@ -541,7 +541,7 @@ private:
 
 public:
 	Player* GetBot() { return bot; }
-    Player* GetMaster() { return master; }
+    Player* GetMaster() { return GetLiveMaster(); }
 
     // accessor for the active engine so
     // cpp can build heartbeat / debug payloads without being
@@ -597,16 +597,25 @@ public:
         return pl->GetSession() && pl->GetSession()->HasNetworkTransport();
     }
     bool IsSelfMaster() { return master ? (master == bot) : false; }
+    // Resolve the cached master against the live object accessor. The core
+    // updates maps on worker threads, so the cached pointer can be freed
+    // between a null check and the deref. Revalidating here clears dangling
+    // pointers before any GetSession()/deref.
+    Player* GetLiveMaster();
     //Bot has a master that is a player.
-    bool HasRealPlayerMaster() { return master && master->GetSession() && master->GetSession()->HasNetworkTransport(); }
+    bool HasRealPlayerMaster() { Player* m = GetLiveMaster(); return m && m->GetSession() && m->GetSession()->HasNetworkTransport(); }
     //Bot has a master that is actively playing.
-    bool HasActivePlayerMaster() const { return master && master->GetSession() && master->GetSession()->HasNetworkTransport(); }
+    bool HasActivePlayerMaster() { Player* m = GetLiveMaster(); return m && m->GetSession() && m->GetSession()->HasNetworkTransport(); }
     //Checks if the bot is summoned as alt of a player
     bool IsAlt() { return HasRealPlayerMaster() && !TortoiseBots::BotManager::Instance().IsRandomBot(bot->GetObjectGuid()); }
     // Module-owned characters keep their saved build and class defaults. This
     // identity is available before the adapter binds the transient master
     // pointer, which is important while PlayerbotAI constructs its engines.
     bool IsOwnedBot() const;
+    // Issue #84 (P2): module-owned teleport signal. Bumped on every
+    // HandleTeleportAck; engines consume it to drain stale queues even when
+    // the ack tick skips AI updates (short same-map teleports included).
+    uint64_t GetTransitionGeneration() const { return transitionGeneration; }
     //Get the group leader or the master of the bot.
     Player* GetGroupMaster() { return bot->InBattleGround() ? master : bot->GetGroup() ? (sObjectMgr.GetPlayer(bot->GetGroup()->GetLeaderGuid()) ? sObjectMgr.GetPlayer(bot->GetGroup()->GetLeaderGuid()) : master) : master; }
 
@@ -769,6 +778,8 @@ protected:
     WorldPosition jumpDestination;
     uint32 jumpTime;
     bool fallAfterJump;
+    // Issue #84 (P2): bumped by HandleTeleportAck, consumed by engines.
+    uint64_t transitionGeneration = 0;
     uint32 faceTargetUpdateDelay;
     bool isPlayerFriend = false;
     bool isMovingToTransport = false;

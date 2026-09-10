@@ -1,5 +1,6 @@
 #pragma once
 
+#include <string>
 #include <unordered_set>
 #include "Config/Config.h"
 #include "Talentspec.h"
@@ -150,10 +151,35 @@ public:
     std::list<uint32> vendorOverAHItemIds;
     bool botCheckAllAuctionListings;
     bool botsSaveEpics;
+    uint32 auctionPriceRefreshInterval = 60; // seconds between price mirror refreshes
     // Default-off bounded AH market population (module-only, native transaction path).
     bool ahMarketEnabled = false;
     uint32 ahMarketInterval = 120; // seconds between market ticks
     uint32 ahMarketBatchSize = 1;  // max auctions posted per tick
+    // Synthetic AH Supply and Buyer Engine with Work Budgets (Issue #88)
+    bool ahMarketSyntheticSupply = false;
+    bool ahMarketBuyer = false;
+    uint32 ahMarketBudgetUs = 2000;         // Max execution microseconds per world tick (budget cap)
+    uint32 ahMarketMaxOperations = 32;      // Max work operations per world tick (op-count cap)
+    uint32 ahMarketChanceSell = 10;         // Chance % per cycle to enter Gather/Post
+    uint32 ahMarketChanceBuy = 10;          // Chance % per cycle to enter Buy
+    // Observability telemetry UDP emitter (module-only). Zero/empty means
+    // "not set here"; the emitter then falls back to the module config.
+    bool observability = false;
+    uint32 observabilityPort = 0;
+    std::string observabilityHost;
+    uint32 ahMarketBuyValue = 80;           // Buyer evaluation willingness % (relative to fair value)
+    uint32 ahMarketMaxSpendPerBot = 0;      // Max spend per bot (0 = unlimited up to AH budget)
+    uint32 ahMarketMaxQuality = 4;          // Max quality for synthetic supply (0=Poor..4=Epic)
+    uint32 ahMarketMaxLevel = 60;           // Max required level for synthetic items
+    bool ahMarketDynamicLevel = false;      // Dynamic level cap based on online players
+    uint32 ahMarketLevelRefresh = 600;      // Dynamic level refresh interval in seconds
+    uint32 ahMarketVariance = 10;           // Random price variance (+/- %)
+    uint32 ahMarketBidMin = 75;             // Min start bid % of buyout
+    uint32 ahMarketBidMax = 90;             // Max start bid % of buyout
+    uint32 ahMarketTimeMin = 8;             // Min auction duration (hours)
+    uint32 ahMarketTimeMax = 24;            // Max auction duration (hours)
+    bool ahMarketValueVendor = true;        // Use vendor price multiplier for vendor-sold goods
     //
     bool randomBotLoginAtStartup;
     // Bounded idempotent RNDBOT population: reuse existing RNDBOT% accounts/
@@ -342,6 +368,11 @@ public:
 
     BotSelfBotLevel selfBotLevel;
     uint32 iterationsPerTick;
+    // Issue #84: bounded failure backoff tuning. Zero base/max disables.
+    uint32 failedActionRetryBaseMs;
+    uint32 failedActionRetryMaxMs;
+    uint32 failedActionCacheTtlMs;
+    uint32 failedActionCacheMaxEntries;
 
     std::string autoPickReward;
     bool autoEquipUpgradeLoot;

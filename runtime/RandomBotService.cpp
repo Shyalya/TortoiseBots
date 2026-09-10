@@ -1,6 +1,8 @@
 #include "RandomBotService.h"
+#include "BotActivityLease.h"
 
 #include "BotManager.h"
+#include "GearSeedingGuard.h"
 #include "../host/BotSessionAdapter.h"
 #include "ObjectAccessor.h"
 #include "ObjectMgr.h"
@@ -533,7 +535,7 @@ bool RandomBotService::TryAutoCreate()
                 }
                 return false;
             }
-            m_pendingNextRetry = now + 60;
+            m_pendingNextRetry = now + 1;
             if (!m_pendingStaleLogged && m_pendingSince && now - m_pendingSince >= 300)
             {
                 sLog.outError("TortoiseBots: auto-create pending account %s unresolved for %ld seconds, continuing with existing accounts (one pending kept, no new allocation)",
@@ -575,7 +577,7 @@ bool RandomBotService::TryAutoCreate()
 
         bool isMixed = false;
         uint32_t allowed = GetAccountAllowedTeam(accId, isMixed);
-        if (isMixed)
+        if (isMixed && !allowTwoSide)
         {
             sLog.outError("TortoiseBots: auto-create account %u has mixed-faction RNDBOT characters, excluding from auto-create", accId);
             m_failedAutoCreateAccounts.insert(accId);
@@ -637,6 +639,7 @@ bool RandomBotService::TryAutoCreate()
         char suffixBuf[16];
         std::snprintf(suffixBuf, sizeof(suffixBuf), "%06u", suffix);
         std::string username = safePrefix + suffixBuf;
+        AccountMgr::normalizeString(username);
         if (sAccountMgr.GetId(username) != 0)
             continue;
         std::string password = GenerateRandomPassword();
@@ -661,7 +664,7 @@ bool RandomBotService::TryAutoCreate()
                 // account or spin. Log once after prolonged unresolved period.
                 m_pendingAccountName = username;
                 m_pendingSince = time(nullptr);
-                m_pendingNextRetry = m_pendingSince + 60;
+                m_pendingNextRetry = m_pendingSince + 1;
                 m_pendingStaleLogged = false;
                 return false;
             }
@@ -818,6 +821,7 @@ void RandomBotService::RemoveExpiredBots(uint32_t diff)
         sLog.outString("TortoiseBots: native random bot %s reached its online lifetime; removing",
             candidate.characterGuid.GetString().c_str());
         BotManager::Instance().RemoveBot(candidate.characterGuid, true);
+        BotActivityLeaseManager::Instance().Release(candidate.characterGuid.GetCounter(), BotActivity::Grinding);
         m_ageMs[i] = 0;
     }
 }
@@ -830,7 +834,10 @@ void RandomBotService::MaintainOnlinePool()
     {
         for (Candidate const& candidate : m_candidates)
             if (BotManager::Instance().IsRandomBot(candidate.characterGuid))
+            {
                 BotManager::Instance().RemoveBot(candidate.characterGuid, true);
+                BotActivityLeaseManager::Instance().Release(candidate.characterGuid.GetCounter(), BotActivity::Grinding);
+            }
         return;
     }
 
@@ -877,6 +884,9 @@ void RandomBotService::MaintainOnlinePool()
             }
             if (BotSessionAdapter::GetHeadlessSessionState(pinnedCandidate->characterGuid) != HeadlessSessionState::NotFound)
                 continue;
+            uint32 guidLow = pinnedCandidate->characterGuid.GetCounter();
+            if (!BotActivityLeaseManager::Instance().TryAcquire(guidLow, BotActivity::Grinding, 0))
+                continue;
 
             if (BotManager::Instance().AddRandomBot(pinnedCandidate->accountId, pinnedCandidate->characterGuid))
             {
@@ -885,6 +895,8 @@ void RandomBotService::MaintainOnlinePool()
                 sLog.outString("TortoiseBots: pinned random bot %s queued on account %u (prioritized)",
                     pinnedCandidate->characterGuid.GetString().c_str(), pinnedCandidate->accountId);
             }
+            else
+                BotActivityLeaseManager::Instance().Release(guidLow, BotActivity::Grinding);
         }
     }
 
@@ -909,6 +921,10 @@ void RandomBotService::MaintainOnlinePool()
         if (BotSessionAdapter::GetHeadlessSessionState(candidate.characterGuid) != HeadlessSessionState::NotFound)
             continue;
 
+        uint32 guidLow = candidate.characterGuid.GetCounter();
+        if (!BotActivityLeaseManager::Instance().TryAcquire(guidLow, BotActivity::Grinding, 0))
+            continue;
+
         if (BotManager::Instance().AddRandomBot(candidate.accountId, candidate.characterGuid))
         {
             ++online;
@@ -916,6 +932,8 @@ void RandomBotService::MaintainOnlinePool()
             sLog.outString("TortoiseBots: native random bot %s queued on account %u",
                 candidate.characterGuid.GetString().c_str(), candidate.accountId);
         }
+        else
+            BotActivityLeaseManager::Instance().Release(guidLow, BotActivity::Grinding);
     }
 }
 
@@ -923,6 +941,8 @@ void RandomBotService::Update(uint32_t diff)
 {
     if (!m_initialized || !sPlayerbotAIConfig.enabled)
         return;
+
+    sRandomBotFacade.RefreshAuctionPrices(diff);
 
     uint32_t cadence = std::max<uint32_t>(1000, sPlayerbotAIConfig.randomBotUpdateInterval);
     m_serviceElapsedMs += diff;
@@ -932,9 +952,15 @@ void RandomBotService::Update(uint32_t diff)
     uint32_t elapsed = m_serviceElapsedMs;
     m_serviceElapsedMs = 0;
 
-    // Bounded auto-create: one attempt per cadence, no per-tick LIKE scan.
+    // Bounded auto-create: up to 5 creations per cadence if progressing toward target
     if (sPlayerbotAIConfig.randomBotAutoCreate)
-        TryAutoCreate();
+    {
+        for (int i = 0; i < 5; ++i)
+        {
+            if (!TryAutoCreate())
+                break;
+        }
+    }
 
     if (!sPlayerbotAIConfig.randomBotAutologin)
         return;
@@ -972,7 +998,18 @@ void RandomBotService::Update(uint32_t diff)
         if (sPlayerbotAIConfig.randomGearUpgradeEnabled && randomizeInterval &&
             m_randomizeAgeMs[i] >= randomizeInterval * 1000)
         {
-            sRandomBotFacade.UpdateGearSpells(player);
+            // Same fresh-bot-only rule as login seeding (GearSeedingGuard.h):
+            // never overwrite earned gear on a timer tick. The login path
+            // normally seeds first; this is a backstop for pool bots that
+            // somehow entered the world unseeded.
+            uint32 timerGuidLow = player->GetGUIDLow();
+            bool freshTimerBot = TortoiseBots::NeedsInitialGearSeeding(
+                player->GetTotalPlayedTime(), sRandomBotFacade.GetValue(timerGuidLow, "seeded"));
+            if (player->GetLevel() >= 5 && freshTimerBot)
+            {
+                sRandomBotFacade.UpdateGearSpells(player);
+                sRandomBotFacade.SetValue(timerGuidLow, "seeded", 1);
+            }
             m_randomizeAgeMs[i] = 0;
         }
     }
@@ -989,6 +1026,7 @@ void RandomBotService::Shutdown()
     {
         if (BotManager::Instance().IsRandomBot(candidate.characterGuid))
             BotManager::Instance().RemoveBot(candidate.characterGuid, true);
+        BotActivityLeaseManager::Instance().Release(candidate.characterGuid.GetCounter(), BotActivity::Grinding);
     }
 
     m_started = false;

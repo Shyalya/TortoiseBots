@@ -1,4 +1,4 @@
-# Native Vanilla/Turtle 1.18.1 module integration for TortoiseBots.
+# Native Vanilla/Tortoise 1.18.1 module integration for TortoiseBots.
 #
 # Penqle's module loader recursively collects every C/C++ file below src/.
 # Keep that tree limited to the loader entrypoint and describe the actual
@@ -73,9 +73,11 @@ if(TORTOISE_MODULE_CMAKE_PHASE STREQUAL "DISCOVERY")
     "${TORTOISEBOTS_ROOT}/host/BotSessionAdapter.cpp"
     "${TORTOISEBOTS_ROOT}/host/BotChatAdapter.cpp"
     "${TORTOISEBOTS_ROOT}/host/BotPacketAdapter.cpp"
+    "${TORTOISEBOTS_ROOT}/host/BotPacketPump.cpp"
     "${TORTOISEBOTS_ROOT}/host/BotPlayerAdapter.cpp"
     "${TORTOISEBOTS_ROOT}/host/LftFillAdapter.cpp"
     "${TORTOISEBOTS_ROOT}/runtime/BotManager.cpp"
+    "${TORTOISEBOTS_ROOT}/runtime/BotActivityLease.cpp"
     "${TORTOISEBOTS_ROOT}/runtime/RandomBotService.cpp"
     "${TORTOISEBOTS_ROOT}/runtime/LftBotFillService.cpp"
     "${TORTOISEBOTS_ROOT}/runtime/AhMarketService.cpp"
@@ -83,6 +85,7 @@ if(TORTOISE_MODULE_CMAKE_PHASE STREQUAL "DISCOVERY")
     "${TORTOISEBOTS_ROOT}/runtime/PlayerbotAIStorage.cpp"
     "${TORTOISEBOTS_ROOT}/runtime/PlayerbotAIAdapter.cpp"
     "${TORTOISEBOTS_ROOT}/runtime/PlayerbotRuntimeFacade.cpp"
+    "${TORTOISEBOTS_ROOT}/runtime/ObservabilityEmitter.cpp"
     "${TORTOISEBOTS_ROOT}/behavior/Movement.cpp"
     "${TORTOISEBOTS_ROOT}/behavior/PlayerConvenience.cpp"
     "${TORTOISEBOTS_ROOT}/commands/BotCommands.cpp"
@@ -90,7 +93,7 @@ if(TORTOISE_MODULE_CMAKE_PHASE STREQUAL "DISCOVERY")
 
   # These are the module-owned runtime and mature AI foundations. The donor
   # manager/login sources are intentionally absent from this list and are
-  # removed from the physical tree as part of the Vanilla/Turtle cleanup.
+  # removed from the physical tree as part of the Vanilla/Tortoise cleanup.
   set(TORTOISEBOTS_AI_SRC
     "${TORTOISEBOTS_ROOT}/ai/playerbot/PlayerbotAIBase.cpp"
     "${TORTOISEBOTS_ROOT}/ai/playerbot/PlayerbotAI.cpp"

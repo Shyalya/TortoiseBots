@@ -9,6 +9,9 @@
 
 #include "playerbot/AiFactory.h"
 
+#include "../../runtime/ObservabilityEmitter.h"
+#include "host/BotPacketPump.h"
+
 #include "Movement/MovementGenerator.h"
 #include "Maps/GridNotifiers.h"
 #include "Maps/GridNotifiersImpl.h"
@@ -269,6 +272,20 @@ PlayerbotAI::~PlayerbotAI()
 
     if (aiObjectContext)
         delete aiObjectContext;
+}
+
+Player* PlayerbotAI::GetLiveMaster()
+{
+    if (!master)
+        return nullptr;
+
+    Player* live = masterGuid ? sObjectAccessor.FindPlayer(masterGuid) : nullptr;
+    if (live != master)
+    {
+        master = nullptr;
+        return nullptr;
+    }
+    return master;
 }
 
 void PlayerbotAI::UpdateAI(uint32 elapsed, bool minimal)
@@ -1065,6 +1082,15 @@ void PlayerbotAI::OnDeath()
         {
             SET_AI_VALUE(uint32, "death count", AI_VALUE(uint32, "death count") + 1);
 
+            if (sObservabilityEmitter.IsEnabled())
+            {
+                Unit* deathTarget = AI_VALUE(Unit*, "current target");
+                std::ostringstream deathDetails;
+                deathDetails << "Died (death #" << AI_VALUE(uint32, "death count") << ")";
+                sObservabilityEmitter.EmitAnomaly("BOT_DEATH", "INFO", bot, deathDetails.str(),
+                    deathTarget ? deathTarget->GetName() : "", "", "death");
+            }
+
             if (sPlayerbotAIConfig.hasLog("deaths.csv"))
             {
                 WorldPosition botPos(bot);
@@ -1270,6 +1296,10 @@ void PlayerbotAI::UpdateAIInternal(uint32 elapsed, bool minimal)
 
 void PlayerbotAI::HandleTeleportAck()
 {
+    // Issue #84 (P2): the single choke point every BotManager-driven ack
+    // flows through (UpdateBots skips AI updates this tick). Engines compare
+    // this counter to drain stale queues on arrival, however short the hop.
+    ++transitionGeneration;
     if (IsRealPlayer() && bot->IsBeingTeleportedFar())
         return;
 
@@ -2164,6 +2194,12 @@ void PlayerbotAI::DoNextAction(bool min, bool forceActivity)
             if (masterChanged)
             {
                 master = newMaster;
+                // Bot members were skipped above, so a changed master here is a
+                // real player taking ownership: halt autonomous loops now. Full
+                // reset purges travel/grind targets; StopMoving cancels the
+                // current path so the bot tethers to its owner immediately.
+                Reset(true);
+                bot->StopMoving();
                 ResetStrategies();
 
                 if (sRandomBotFacade.IsFreeBot(bot))
@@ -3022,7 +3058,12 @@ bool PlayerbotAI::SayToGuild(std::string msg, bool likePlayer)
 
             for (auto& player : sRandomBotFacade.GetPlayers())
             {
-                if (player.second->GetGuildId() == bot->GetGuildId())
+                // The facade view can outlive removed bots; resolve by GUID.
+                Player* guildBot = sObjectAccessor.FindPlayer(ObjectGuid(HIGHGUID_PLAYER, player.first));
+                if (!guildBot || !guildBot->IsInWorld())
+                    continue;
+
+                if (guildBot->GetGuildId() == bot->GetGuildId())
                 {
                     if (likePlayer || (sPlayerbotAIConfig.llmEnabled > 0 && (HasStrategy("ai chat", BotState::BOT_STATE_NON_COMBAT) || sPlayerbotAIConfig.llmEnabled == 3) &&
                         sPlayerbotAIConfig.llmBotToBotChatChance))
@@ -3037,7 +3078,7 @@ bool PlayerbotAI::SayToGuild(std::string msg, bool likePlayer)
 
                         std::unique_ptr<WorldPacket> packetPtr(new WorldPacket(packet_template));
 
-                        bot->GetSession()->QueuePacket(packetPtr.release());
+                        TortoiseBots::BotPacketPump::Enqueue(bot, packetPtr.release());
                         return true;
                     }
                     break;
@@ -3100,7 +3141,7 @@ bool PlayerbotAI::SayToParty(std::string msg, bool likePlayer)
 
                 std::unique_ptr<WorldPacket> packetPtr(new WorldPacket(packet_template));
 
-                bot->GetSession()->QueuePacket(packetPtr.release());
+                TortoiseBots::BotPacketPump::Enqueue(bot, packetPtr.release());
                 return true;
             }
         }
@@ -3160,7 +3201,7 @@ bool PlayerbotAI::Yell(std::string msg, bool likePlayer)
 
             std::unique_ptr<WorldPacket> packetPtr(new WorldPacket(packet_template));
 
-            bot->GetSession()->QueuePacket(packetPtr.release());
+            TortoiseBots::BotPacketPump::Enqueue(bot, packetPtr.release());
             return true;
         }
     }
@@ -3196,7 +3237,7 @@ bool PlayerbotAI::Say(std::string msg, bool likePlayer)
 
             std::unique_ptr<WorldPacket> packetPtr(new WorldPacket(packet_template));
 
-            bot->GetSession()->QueuePacket(packetPtr.release());
+            TortoiseBots::BotPacketPump::Enqueue(bot, packetPtr.release());
             return true;
         }
     }
@@ -5194,7 +5235,7 @@ void PlayerbotAI::DurabilityLoss(Item* item, double percent)
 
 bool IsAlliance(uint8 race)
 {
-    // The core owns race faction data, including Turtle's Goblin/High Elf
+    // The core owns race faction data, including Tortoise's Goblin/High Elf
     // rows. Do not duplicate the classic eight-race table here.
     return Player::TeamForRace(race) == ALLIANCE;
 }
@@ -5304,7 +5345,12 @@ bool PlayerbotAI::HasPlayerNearby(WorldPosition pos, float range)
     bool nearPlayer = false;
     for (auto& i : sRandomBotFacade.GetPlayers())
     {
-        Player* player = i.second;
+        // The facade map is only re-synced periodically; entries can outlive
+        // their Player under bot churn, so resolve by GUID before any deref.
+        Player* player = sObjectAccessor.FindPlayer(ObjectGuid(HIGHGUID_PLAYER, i.first));
+        if (!player || !player->IsInWorld())
+            continue;
+
         if (!player->IsGameMaster() || player->IsGMVisible())
         {
             if (player->GetMapId() != bot->GetMapId())
@@ -5316,7 +5362,7 @@ bool PlayerbotAI::HasPlayerNearby(WorldPosition pos, float range)
             // if player is far check farsight/cinematic camera
             Camera& viewPoint = player->GetCamera();
             WorldObject* viewObj = viewPoint.GetBody();
-            if (viewObj && viewObj != player)
+            if (viewObj && viewObj != player && viewObj->IsInWorld())
             {
                 if (pos.sqDistance(WorldPosition(viewObj)) < sqRange)
                     nearPlayer = true;
@@ -5339,7 +5385,10 @@ bool PlayerbotAI::HasManyPlayersNearby(uint32 trigerrValue, float range)
 
     for (auto& i : sRandomBotFacade.GetPlayers())
     {
-        Player* player = i.second;
+        Player* player = sObjectAccessor.FindPlayer(ObjectGuid(HIGHGUID_PLAYER, i.first));
+        if (!player || !player->IsInWorld())
+            continue;
+
         if ((!player->IsGameMaster() || player->IsGMVisible()) && sServerFacade.getDistance2d(player, bot) < sqRange)
         {
             found++;
@@ -5474,11 +5523,12 @@ ActivePiorityType PlayerbotAI::GetPriorityType()
     // friends always active
     for (auto& i : sRandomBotFacade.GetPlayers())
     {
-        Player* player = i.second;
+        Player* player = sObjectAccessor.FindPlayer(ObjectGuid(HIGHGUID_PLAYER, i.first));
         if (!player || !player->IsInWorld())
             continue;
 
-        if (player->GetSocial()->HasFriend(bot->getObjectGuid()))
+        PlayerSocial* social = player->GetSocial();
+        if (social && social->HasFriend(bot->getObjectGuid()))
             return ActivePiorityType::PLAYER_FRIEND;
     }
 
@@ -7166,7 +7216,7 @@ void PlayerbotAI::ProcessDelayedPackets()
             !PlayerbotAIStorage::Instance().GetAI(bot))
             continue;
 
-        bot->GetSession()->QueuePacket(queued.packet.release());
+        TortoiseBots::BotPacketPump::Enqueue(bot, queued.packet.release());
     }
 }
 
@@ -7543,10 +7593,10 @@ void PlayerbotAI::ImbueItem(Item* item, uint16 targetFlag, ObjectGuid targetGUID
       *packet << targetGUID.WriteAsPacked();
 
 #ifdef CMANGOS
-   bot->GetSession()->QueuePacket(packet.release());
+   TortoiseBots::BotPacketPump::Enqueue(bot, packet.release());
 #endif
 #ifdef MANGOS
-   bot->GetSession()->QueuePacket(packet);
+   TortoiseBots::BotPacketPump::Enqueue(bot, packet);
 #endif
 }
 
@@ -7760,7 +7810,14 @@ bool PlayerbotAI::HasPlayerRelation()
 
     for (auto& p : sRandomBotFacade.GetPlayers())
     {
-        if (p.second && p.second->GetSocial()->HasFriend(bot->getObjectGuid()))
+        // The facade view can outlive removed bots; resolve by GUID before
+        // touching the Player or its social list.
+        Player* peer = sObjectAccessor.FindPlayer(ObjectGuid(HIGHGUID_PLAYER, p.first));
+        if (!peer || !peer->IsInWorld())
+            continue;
+
+        PlayerSocial* social = peer->GetSocial();
+        if (social && social->HasFriend(bot->getObjectGuid()))
         {
             SetPlayerFriend(true);
             return true;

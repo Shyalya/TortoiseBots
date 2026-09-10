@@ -40,7 +40,7 @@ Unless qualified otherwise, these terms mean `Penqle/tortoise-wow`: upstream, up
 `Shyalya/tortoise-wow` and other PlayerBots repos (`cmangos/playerbots`, `mod-playerbots`, `mangoszero/server`, `cmangos/mangos-classic`) are **read-only donor references**, not upstream. Source-of-truth order:
 
 1. `Penqle/tortoise-wow` pinned target core
-2. Turtle data / DBC / runtime evidence
+2. Tortoise data / DBC / runtime evidence
 3. This repo's host contract (`docs/HOST_API.md`, `docs/PLAN.md`)
 4. Shyalya and other donors as references only
 
@@ -55,7 +55,7 @@ All references are remote, read-only, and optional. Clone only what you need for
 | Reference | URL | Purpose |
 | --- | --- | --- |
 | Upstream core | <https://github.com/Penqle/tortoise-wow> | Target core (`Penqle/tortoise-wow`) |
-| Shyalya fork | <https://github.com/Shyalya/tortoise-wow> | Turtle 1.18.1 compatibility evidence, known API differences, Turtle fixes |
+| Shyalya fork | <https://github.com/Shyalya/tortoise-wow> | Tortoise 1.18.1 compatibility evidence, known API differences, Tortoise fixes |
 | CMaNGOS PlayerBots | <https://github.com/cmangos/playerbots> | Existing combat/movement/class/healing/CC/dungeon behavior |
 | CMaNGOS Classic | <https://github.com/cmangos/mangos-classic> | What CMaNGOS PlayerBots expects from its host |
 | MangosZero | <https://github.com/mangoszero/server> | Lifecycle/session/group patterns |
@@ -66,7 +66,7 @@ Do not edit, commit to, or rebase reference repos. Do not blindly copy their arc
 
 ### What each reference is for — quick guide
 
-- **Shyalya** — Turtle spells/talents, session/movement/group/loot lessons, integration pain
+- **Shyalya** — Tortoise spells/talents, session/movement/group/loot lessons, integration pain
 - **CMaNGOS PlayerBots** — richest behavior source for combat/movement/healing/CC/dungeons
 - **CMaNGOS Classic** — host API definitions and lifecycle semantics
 - **MangosZero** — smaller bot lifecycle, character creation, group handling
@@ -78,7 +78,7 @@ Do not search every repo for every task:
 - **Public behavior / commands / ownership** → Shyalya → CMaNGOS PlayerBots
 - **Combat / class AI / healing / CC / movement** → CMaNGOS PlayerBots → Shyalya → MangosZero
 - **Session / lifecycle / bot login** → Current Tortoise core → MangosZero → Shyalya → CMaNGOS
-- **Turtle spells / talents / custom content** → Tortoise core/data → Shyalya → Vanilla refs
+- **Tortoise spells / talents / custom content** → Tortoise core/data → Shyalya → Vanilla refs
 - **Runtime / integration failures** → Current core source → Docker env (if you have one) → logs → references
 
 The current Tortoise architecture always outranks making a donor port easier.
@@ -143,7 +143,7 @@ For imported behavior:
 1. Understand observable behavior
 2. Check donor behavior where applicable
 3. Inspect the most relevant donor
-4. Inspect Turtle differences
+4. Inspect Tortoise differences
 5. Define expected behavior / acceptance test
 6. Implement inside the new module
 7. Test it
@@ -187,6 +187,44 @@ Useful metrics: bot update time, total bot CPU, DB queries, path/movement reques
 
 ---
 
+## Observability subsystem
+
+`tools/observability` is a standalone Go daemon (Prometheus + web dashboard) fed by `runtime/ObservabilityEmitter.{h,cpp}` over non-blocking UDP. It is optional and config-gated; core stays ignorant of it.
+
+Rules that keep its state honest:
+
+- The daemon has exactly one authoritative store (`internal/state`). REST, WebSocket, and Prometheus all read it.
+- The emitter sends self-contained snapshot cycles: one `HEARTBEAT` + `BOT_BATCH` chunks sharing a `seq`. Publish a roster only from a complete cycle; clients replace their roster wholesale instead of merging deltas.
+- Every datagram also carries a `session` epoch (server process start). The daemon resets sequence/roster state when it changes, so a server restart that resets `seq` cannot be locked out as "old cycles".
+- Bound and prune every emitter table (bot tracking, action failures, anomaly cooldowns) on each snapshot. Macro-state ratios are windowed, never lifetime totals.
+- Anomaly types are a closed set (`model.AcceptedAnomalyTypes`) so Prometheus label cardinality stays bounded.
+- Bump `kProtocolVersion` in `ObservabilityEmitter.cpp` and `model.ProtocolVersion` in `internal/model/types.go` together.
+
+### Telemetry surface (protocol v4)
+
+Each `BOT_BATCH` bot entry carries: `name, guid, class, role, level, hp/max_hp, power/max_power, power_type, map, zone, x/y/z/o, target, strategy, state, last_action, last_trigger`.
+
+- `power_type` is the current resource (`mana`, `rage`, `energy`, `focus`, `happiness`); druids reflect their active form. Label bars by it, never hardcode "mana".
+- `last_action`/`last_trigger` feed repeated-action detection; they are sampled per 2s snapshot, not per execution.
+- Anomalies carry `guid` so the daemon can key episodes; accepted types are `BOT_STUCK`, `ACTION_LOOP`, `UNREACHABLE_TARGET`, `BOT_DEATH`.
+- `BOT_DEATH` is emitted from `PlayerbotAI::OnDeath` (target/zone/position/level).
+- Anomaly emitters that can persist (`UNREACHABLE_TARGET`) re-report every cooldown window so the daemon has a liveness signal; do not make them fire-once.
+
+### Issue episodes (`internal/state` issue tracker)
+
+Persistent problems are tracked as open/closed episodes per bot, surfaced in the dashboard Issues tab, map glow, roster badge, and `/api/v1/issues`.
+
+- Snapshot-derived: `STUCK` (moving state but position frozen >= 60s), `DEAD_LONG` (dead >= 2 min).
+- Anomaly-derived: `ACTION_LOOP`, `UNREACHABLE_TARGET` (refreshed by the emitter, expire after a 2 min TTL, or close early when a snapshot contradicts them).
+- **Minimum age**: only episodes that persist `ISSUE_MIN_AGE_SEC` (default 300s) are shown; shorter ones are discarded entirely. This is the guard against transient false positives — keep new detectors behind it.
+- Severity escalates `watch` (>= 1 min) -> `persistent` (>= 10 min).
+- Resolved history survives a game-server restart (`Reset()` clears open episodes only); it is in-memory and bounded, so a daemon restart clears it.
+- Metrics: `tortoisebots_issues_active{type}`; anomalies counted by type (including `BOT_DEATH`).
+
+Dashboard UI: Bots roster supports status/class/role filters, "issues only", sortable columns, and a power bar; the Issues tab filters by type and minimum duration and highlights issue bots on the map.
+
+---
+
 ## Git safety
 
 Never reset/clean/overwrite/stage/include unrelated user changes. Inspect `git status --short` before and after work. Do not use destructive Git commands unless explicitly requested.
@@ -209,6 +247,7 @@ A successful build/test remains evidence for unchanged code. Do not rebuild afte
 
 - **Docs/comments/config only** → text checks + `git diff --check`, no C++ build.
 - **Module-only C++** → one cached `MODULE_TORTOISEBOTS=static` build after the batch is coherent.
+- **Observability tool (Go)** → `docker run --rm -v "$PWD/tools/observability:/src" -w /src golang:1.22-alpine sh -c 'go vet ./... && go test ./...'` (no host Go toolchain). Live check: server logs `Observability telemetry active`, `/metrics` shows `mangos_server_online 1` and rising `tortoisebots_snapshots_total`.
 - **Core-seam change** → cached module build while iterating; full ON/OFF matrix only when stable.
 - **Build-gating / CMake change** → directly affected configurations.
 - **Phase / PR / handover boundary** → full OFF/ON matrix once (`git diff --check` + coupling audits + required runtime gates).

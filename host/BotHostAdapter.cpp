@@ -1,10 +1,12 @@
 #include "BotHostAdapter.h"
 
 #include "../behavior/PlayerConvenience.h"
+#include "../runtime/BotActivityLease.h"
 #include "../runtime/BotManager.h"
 #include "../runtime/RandomBotService.h"
 #include "../runtime/AhMarketService.h"
 #include "../runtime/BattlegroundQueueService.h"
+#include "../runtime/ObservabilityEmitter.h"
 #include "../ai/playerbot/PlayerbotAIConfig.h"
 #include "Config/Config.h"
 #include "ObjectMgr.h"
@@ -105,22 +107,27 @@ void BotHostAdapter::OnStartup()
     }
 
     sLog.outString("TortoiseBots: native module loaded (AI %s)", configured ? "enabled" : "disabled");
+    ObservabilityEmitter::Instance().Initialize();
 }
-
 void BotHostAdapter::OnUpdate(uint32 diff)
 {
     ++m_ticks;
+    // Expire stale leases before services select candidates (issue #89).
+    BotActivityLeaseManager::Instance().Update(diff);
     BotManager::Instance().OnWorldUpdate(diff);
     PlayerConvenience::Instance().Update(diff);
     RandomBotService::Instance().Update(diff);
     AhMarketService::Instance().Update(diff);
     BattlegroundQueueService::Instance().Update(diff);
+    ObservabilityEmitter::Instance().Update(diff);
 }
 
 void BotHostAdapter::OnShutdown()
 {
+    ObservabilityEmitter::Instance().Shutdown();
     BattlegroundQueueService::Instance().Shutdown();
     RandomBotService::Instance().Shutdown();
+    BotActivityLeaseManager::Instance().Clear();
     sLog.outString("TortoiseBots: native module shutting down after %u world ticks", m_ticks);
 }
 
