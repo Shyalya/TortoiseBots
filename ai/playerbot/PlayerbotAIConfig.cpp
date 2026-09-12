@@ -369,6 +369,7 @@ bool PlayerbotAIConfig::Initialize()
     randomBotLoginAtStartup = config.GetBoolDefault("AiPlayerbot.RandomBotLoginAtStartup", false);
     randomBotAutoCreate = config.GetBoolDefault("AiPlayerbot.RandomBotAutoCreate", false);
     enableRandomTeleports = config.GetBoolDefault("AiPlayerbot.EnableRandomTeleports", false);
+    relocateHopelessDeaths = config.GetBoolDefault("AiPlayerbot.RelocateHopelessDeaths", true);
     randomBotLftEnabled = config.GetBoolDefault("AiPlayerbot.RandomBotLftEnabled", false);
     randomBotLftUpdateInterval = config.GetIntDefault("AiPlayerbot.RandomBotLftUpdateInterval", 15000);
     randomBotLftMaxFillsPerInterval = config.GetIntDefault("AiPlayerbot.RandomBotLftMaxFillsPerInterval", 1);
@@ -693,7 +694,7 @@ bool PlayerbotAIConfig::Initialize()
     autoTrainSpells = config.GetStringDefault("AiPlayerbot.AutoTrainSpells", "no");
     autoPickTalents = config.GetStringDefault("AiPlayerbot.AutoPickTalents", "no");
     autoLearnTrainerSpells = config.GetBoolDefault("AiPlayerbot.AutoLearnTrainerSpells", false);
-    autoLearnQuestSpells = config.GetBoolDefault("AiPlayerbot.AutoLearnQuestSpells", false);
+    autoLearnQuestSpells = config.GetBoolDefault("AiPlayerbot.AutoLearnQuestSpells", true);
     autoLearnDroppedSpells = config.GetBoolDefault("AiPlayerbot.AutoLearnDroppedSpells", false);
     autoDoQuests = config.GetBoolDefault("AiPlayerbot.AutoDoQuests", true);
     generateTravelNodes = config.GetBoolDefault("AiPlayerbot.GenerateTravelNodes", false);
