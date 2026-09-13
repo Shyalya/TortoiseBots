@@ -277,6 +277,18 @@ BotManager& BotManager::Instance()
     return instance;
 }
 
+// A character with any primary profession has been through the skill initialisation
+// (or learned one on its own) - either way it must not be re-rolled.
+static bool HasPrimaryProfession(::Player* player)
+{
+    static uint16 const kPrimary[] = { SKILL_ALCHEMY, SKILL_BLACKSMITHING, SKILL_ENCHANTING, SKILL_ENGINEERING,
+                                       SKILL_HERBALISM, SKILL_LEATHERWORKING, SKILL_MINING, SKILL_SKINNING, SKILL_TAILORING };
+    for (uint16 id : kPrimary)
+        if (player->HasSkill(id))
+            return true;
+    return false;
+}
+
 void BotManager::OnPlayerLogin(::Player* player)
 {
     if (!player)
@@ -363,15 +375,16 @@ void BotManager::OnPlayerLogin(::Player* player)
     // Skills are separate from gear seeding. With DisableRandomLevels=1 a bot never goes
     // through Randomize(), the only caller of InitAllSkills(): it would keep weapon
     // skill 1 for good and never get a profession, so grind, craft and gather have
-    // nothing to work with. Give every random bot the level-bound skill set exactly
-    // once, at any level (persisted marker); from then on it trains and skills up on
-    // its own. SetRandomSkill never lowers a skill, so even a repeat is harmless.
-    if (record.random && !sRandomBotFacade.GetValue(botGuidLow, "skillsInit"))
+    // nothing to work with. Give such a bot the level-bound skill set once, at any
+    // level; from then on it trains and skills up on its own. "Once" is decided from
+    // the character itself - a bot that already has a primary profession is left
+    // alone - because the facade values live in memory only and would not survive a
+    // restart (which would re-roll professions every time).
+    if (record.random && !HasPrimaryProfession(player))
     {
         PlayerbotFactory skills(player, player->GetLevel());
         skills.InitAllSkills();
-        sRandomBotFacade.SetValue(botGuidLow, "skillsInit", 1, "", 10 * 365 * 24 * 3600);
-        sLog.outString("TortoiseBots: bot %s received its level-bound skills and professions (once).", player->GetName());
+        sLog.outString("TortoiseBots: bot %s received its level-bound skills and professions.", player->GetName());
     }
 
     sLog.outString("TortoiseBots: bot %s entered world through native PlayerScript", player->GetName());
