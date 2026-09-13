@@ -170,7 +170,6 @@ public:
     std::string observabilityHost;
     // Log every executed engine action to the server log. Debug aid only: with
     // ten random bots this is ~25 lines per second. Default off.
-    bool logEngineActions = false;
     uint32 ahMarketBuyValue = 80;           // Buyer evaluation willingness % (relative to fair value)
     uint32 ahMarketMaxSpendPerBot = 0;      // Max spend per bot (0 = unlimited up to AH budget)
     uint32 ahMarketMaxQuality = 4;          // Max quality for synthetic supply (0=Poor..4=Epic)
