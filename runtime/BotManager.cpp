@@ -6,6 +6,7 @@
 #include "GearSeedingGuard.h"
 #include "../ai/playerbot/PlayerbotAI.h"
 #include "../ai/playerbot/RandomBotFacade.h"
+#include "../ai/playerbot/PlayerbotFactory.h"
 #include "../host/BotSessionAdapter.h"
 #include "../commands/BotCommands.h"
 // pi-lens-ignore: clang:pp_file_not_found
@@ -357,6 +358,20 @@ void BotManager::OnPlayerLogin(::Player* player)
     {
         sRandomBotFacade.UpdateGearSpells(player);
         sRandomBotFacade.SetValue(botGuidLow, "seeded", 1);
+    }
+
+    // Skills are separate from gear seeding. With DisableRandomLevels=1 a bot never goes
+    // through Randomize(), the only caller of InitAllSkills(): it would keep weapon
+    // skill 1 for good and never get a profession, so grind, craft and gather have
+    // nothing to work with. Give every random bot the level-bound skill set exactly
+    // once, at any level (persisted marker); from then on it trains and skills up on
+    // its own. SetRandomSkill never lowers a skill, so even a repeat is harmless.
+    if (record.random && !sRandomBotFacade.GetValue(botGuidLow, "skillsInit"))
+    {
+        PlayerbotFactory skills(player, player->GetLevel());
+        skills.InitAllSkills();
+        sRandomBotFacade.SetValue(botGuidLow, "skillsInit", 1, "", 10 * 365 * 24 * 3600);
+        sLog.outString("TortoiseBots: bot %s received its level-bound skills and professions (once).", player->GetName());
     }
 
     sLog.outString("TortoiseBots: bot %s entered world through native PlayerScript", player->GetName());
