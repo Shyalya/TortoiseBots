@@ -2,6 +2,7 @@
 #include "playerbot/playerbot.h"
 #include "playerbot/LootObjectStack.h"
 #include "ChooseTravelTargetAction.h"
+#include "FishAction.h"
 #include "playerbot/PlayerbotAIConfig.h"
 #include "playerbot/strategy/values/TravelValues.h"
 #include "playerbot/TravelNode.h"
@@ -427,6 +428,12 @@ bool ChooseTravelTargetAction::SetBestTarget(Player* requester, TravelTarget* ta
                     if (posAreaLevel > 0 && posAreaLevel > (int32)bot->GetLevel() + 5)
                     {
                         ai->TellDebug(requester, "Skipping " + destination->GetTitle() + " - area level too high", "debug travel");
+                        continue;
+                    }
+
+                    if (destination->GetPurpose() == TravelDestinationPurpose::GatherFishing && IsFishingSpotGuarded(bot, *position))
+                    {
+                        ai->TellDebug(requester, "Skipping " + destination->GetTitle() + " - fishing spot guarded by hostile creatures", "debug travel");
                         continue;
                     }
 

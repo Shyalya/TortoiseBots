@@ -1,6 +1,7 @@
 
 #include "playerbot/playerbot.h"
 #include "FishValues.h"
+#include "Timer.h"
 
 using namespace ai;
 
@@ -38,6 +39,14 @@ bool DoneFishingValue::Calculate()
 
     //Does not have fishing pole equiped.
     if (!mhItem || mhItem->GetProto()->Class != ITEM_CLASS_WEAPON || mhItem->GetProto()->SubClass != ITEM_SUBCLASS_WEAPON_FISHING_POLE)
+        return false;
+
+    // Between two casts the bot holds the pole and channels nothing - that is not "done":
+    // "done fishing" fired "equip upgrades" every tick between the casts, which took the
+    // pole off (and, with a stat on it, put it right back). Half a minute after the last
+    // cast the fishing is over and the weapon may come back.
+    int const lastCast = AI_VALUE2(int, "manual int", "last fish cast");
+    if (lastCast && WorldTimer::getMSTime() - uint32(lastCast) < 30000)
         return false;
 
     if (bot->GetCurrentSpell(CURRENT_CHANNELED_SPELL))

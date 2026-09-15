@@ -117,6 +117,22 @@ ItemUsage ItemUsageValue::Calculate()
     if (proto->ItemId == 6948)
         return ItemUsage::ITEM_USAGE_KEEP;
 
+    // A fishing pole is a tool: the fish action equips it for fishing and nothing else does.
+    // With a stat on it (Strong Fishing Pole, +5 fishing) it counted as a weapon upgrade, so
+    // "equip upgrades" - which runs whenever a bot holds a pole and is not casting - took it
+    // off and put it right back, 5,000 swaps per minute and bot. The best pole the bot owns
+    // is kept, a lesser spare is junk (one bot carried four spare poles).
+    if (proto->Class == ITEM_CLASS_WEAPON && proto->SubClass == ITEM_SUBCLASS_WEAPON_FISHING_POLE)
+    {
+        if (!ai->HasSkill(SKILL_FISHING))
+            return ItemUsage::ITEM_USAGE_NONE;
+        std::list<Item*> poles = AI_VALUE2(std::list<Item*>, "inventory items", "fishing pole");
+        for (Item* pole : poles)
+            if (pole->GetProto()->ItemLevel > proto->ItemLevel)
+                return ItemUsage::ITEM_USAGE_NONE;
+        return ItemUsage::ITEM_USAGE_KEEP;
+    }
+
     //WARLOCKS GOT TO KEEP SOULSHARDS (keep at least 10)
     if (bot->GetClass() == CLASS_WARLOCK && proto->ItemId == 6265 && CurrentStacks(ai, proto) <= 10)
         return ItemUsage::ITEM_USAGE_KEEP;
@@ -335,6 +351,13 @@ if ((proto->Class == ITEM_CLASS_PROJECTILE ||
             if (proto->Class == ammoClass && proto->SubClass == subClass)
             {
                 uint32 currentAmmoId = bot->GetUInt32Value(PLAYER_AMMO_ID);
+                // A thrown weapon is its own ammo and never sets PLAYER_AMMO_ID, so "no ammo
+                // equipped" was always true for it: a second stack of the same axes in the bag
+                // came back as "equip", equipping it swapped the two stacks and the next tick
+                // swapped them back (28,000 swaps in half an hour for one rogue). The stack in
+                // the ranged slot counts as the equipped ammo.
+                if (pItem->GetProto()->SubClass == ITEM_SUBCLASS_WEAPON_THROWN)
+                    currentAmmoId = pItem->GetEntry();
                 const ItemPrototype* currentAmmoProto = nullptr;
                 if (currentAmmoId)
                     currentAmmoProto = sObjectMgr.GetItemPrototype(currentAmmoId);
