@@ -653,6 +653,18 @@ bool GrindTravelDestination::IsActive(Player* bot, const PlayerTravelInfo& info)
     if (!IsPossible(info))
         return false;
 
+    // A kind of creature the bot recently gave up on (unreachable from where it stood, see
+    // ReachTargetAction) is no grind destination for a while either - otherwise the bot
+    // walks straight back to the same mine and starts over.
+    std::map<uint32, uint32>& unreachableKinds = context->GetValue<std::map<uint32, uint32>&>("unreachable entries")->Get();
+    auto givenUpKind = unreachableKinds.find(GetEntry());
+    if (givenUpKind != unreachableKinds.end())
+    {
+        if (WorldTimer::getMSTime() < givenUpKind->second)
+            return false;
+        unreachableKinds.erase(givenUpKind);
+    }
+
     return GuidPosition(bot).IsHostileTo(GuidPosition(HIGHGUID_UNIT, GetEntry()), bot->GetInstanceId());
 }
 

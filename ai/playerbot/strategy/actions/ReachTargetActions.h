@@ -26,6 +26,8 @@ namespace ai
         float noLosBestDist = 0.0f;
         float noLosStartX = 0.0f;
         float noLosStartY = 0.0f;
+        uint32 lastGiveUpMs = 0;
+        uint32 giveUpsInARow = 0;
 
     public:
 
@@ -89,7 +91,13 @@ namespace ai
                 // (honoured by AttackersValue::IgnoreTarget) and "invalid target" selects
                 // something else. A target that is attacking the bot is never given up on:
                 // it is reachable, or it will come to us.
-                if (!isFriend && !inLos)
+                // Measured after the first version (300 bots, one hour): the give-up only fired
+                // without line of sight, so a target in plain sight across a fence, a cliff or a
+                // stream was chased for minutes ("inLos=true, 54 yd, 100 s"); and the list was
+                // per creature, so a mine full of kobolds was given up on one at a time. Now:
+                // no headway for 15 s counts with or without line of sight (a rooted or stunned
+                // bot is not judged), and the kind of creature is given up on as well.
+                if (!isFriend && !bot->IsRooted() && !bot->HasUnitState(UNIT_STAT_NO_FREE_MOVE))
                 {
                     uint32 const nowMs = WorldTimer::getMSTime();
                     float const dxStart = bot->GetPositionX() - noLosStartX;
@@ -103,17 +111,67 @@ namespace ai
                         noLosStartX = bot->GetPositionX();
                         noLosStartY = bot->GetPositionY();
                     }
-                    else if (nowMs - noLosSinceMs >= 15000 && target->GetVictim() != bot)
+                    else if (nowMs - noLosSinceMs >= 15000 && (target->GetVictim() != bot || !inLos))
                     {
-                        context->GetValue<std::map<ObjectGuid, uint32>&>("unreachable targets")->Get()[target->getObjectGuid()] = nowMs + 5 * MINUTE * IN_MILLISECONDS;
-                        ai->TellDebug(GetMaster(), "Giving up on " + std::string(target->GetName()) + " - out of line of sight, no headway for 15 s", "debug move");
+                        // The attacker exception only holds in sight: a mob that "attacks" the bot
+                        // from out of sight for 15 s without closing in is stuck as well (a Wendigo in
+                        // its cave kept a mage as its victim for four minutes at 44 yd).
+                        std::map<ObjectGuid, uint32>& unreachable = context->GetValue<std::map<ObjectGuid, uint32>&>("unreachable targets")->Get();
+                        auto const known = unreachable.find(target->getObjectGuid());
+                        bool const alreadyGivenUp = known != unreachable.end() && nowMs < known->second;
+                        unreachable[target->getObjectGuid()] = nowMs + 5 * MINUTE * IN_MILLISECONDS;
+                        if (target->IsCreature())
+                            context->GetValue<std::map<uint32, uint32>&>("unreachable entries")->Get()[target->GetEntry()] = nowMs + 5 * MINUTE * IN_MILLISECONDS;
+                        if (alreadyGivenUp)
+                        {
+                            // A second reach action (melee and spell both track the target) - one
+                            // give-up is enough, no second log row and no second anomaly.
+                            noLosTarget = ObjectGuid();
+                            return false;
+                        }
+                        ai->TellDebug(GetMaster(), "Giving up on " + std::string(target->GetName()) + (inLos ? " - in sight but no headway for 15 s" : " - out of line of sight, no headway for 15 s"), "debug move");
+
+                        // Second give-up within three minutes: the whole spot is bad (a cave mouth with
+                        // troggs, trolls and wolves - measured: one bot gave up on six kinds in twenty
+                        // minutes and never left). Every hostile kind in sight goes on the list, so the
+                        // grind destinations here drop and the bot moves on.
+                        if (lastGiveUpMs && nowMs - lastGiveUpMs <= 3 * MINUTE * IN_MILLISECONDS)
+                            ++giveUpsInARow;
+                        else
+                            giveUpsInARow = 1;
+                        lastGiveUpMs = nowMs;
+                        if (giveUpsInARow >= 2)
+                        {
+                            giveUpsInARow = 0;
+                            std::map<uint32, uint32>& kinds = context->GetValue<std::map<uint32, uint32>&>("unreachable entries")->Get();
+                            uint32 blocked = 0;
+                            std::list<ObjectGuid> inSight = AI_VALUE(std::list<ObjectGuid>, "possible targets no los");
+                            for (ObjectGuid const& guid : inSight)
+                            {
+                                Unit* unit = ai->GetUnit(guid);
+                                if (!unit || !unit->IsCreature() || !sServerFacade.IsHostileTo(bot, unit))
+                                    continue;
+                                kinds[unit->GetEntry()] = nowMs + 5 * MINUTE * IN_MILLISECONDS;
+                                ++blocked;
+                            }
+                            ai->TellDebug(GetMaster(), "Leaving this spot - second give-up within three minutes, " + std::to_string(blocked) + " kinds set aside", "debug move");
+                            if (sPlayerbotAIConfig.hasLog("unreachable_targets.csv"))
+                            {
+                                time_t const nowSpot = time(nullptr);
+                                char stampSpot[32];
+                                strftime(stampSpot, sizeof(stampSpot), "%Y-%m-%d %H:%M:%S", localtime(&nowSpot));
+                                std::ostringstream outSpot;
+                                outSpot << stampSpot << "," << bot->GetName() << "," << bot->GetLevel() << ",SPOT," << blocked << ",leave";
+                                sPlayerbotAIConfig.log("unreachable_targets.csv", outSpot.str().c_str());
+                            }
+                        }
                         if (sPlayerbotAIConfig.hasLog("unreachable_targets.csv"))
                         {
                             time_t const now = time(nullptr);
                             char stamp[32];
                             strftime(stamp, sizeof(stamp), "%Y-%m-%d %H:%M:%S", localtime(&now));
                             std::ostringstream out;
-                            out << stamp << "," << bot->GetName() << "," << bot->GetLevel() << "," << target->GetName() << "," << (int)distanceToTarget;
+                            out << stamp << "," << bot->GetName() << "," << bot->GetLevel() << "," << target->GetName() << "," << (int)distanceToTarget << "," << (inLos ? "los" : "nolos");
                             sPlayerbotAIConfig.log("unreachable_targets.csv", out.str().c_str());
                         }
                         noLosTarget = ObjectGuid();

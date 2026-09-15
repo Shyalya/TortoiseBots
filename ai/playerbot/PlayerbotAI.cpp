@@ -1082,12 +1082,14 @@ void PlayerbotAI::SetLastKiller(Unit* killer)
         lastKiller_.name = "Environment";
         lastKiller_.level = 0;
         lastKiller_.isEnvironment = true;
+        lastKiller_.entry = 0;
     }
     else
     {
         lastKiller_.name = killer->GetName();
         lastKiller_.level = killer->GetLevel();
         lastKiller_.isEnvironment = false;
+        lastKiller_.entry = killer->IsCreature() ? killer->GetEntry() : 0;
     }
 }
 
@@ -1130,6 +1132,33 @@ void PlayerbotAI::OnDeath()
         if (!HasActivePlayerMaster() && !bot->InBattleGround())
         {
             SET_AI_VALUE(uint32, "death count", AI_VALUE(uint32, "death count") + 1);
+
+            // Two deaths in a row to the same kind of creature within fifteen minutes: the bot
+            // leaves that kind alone for half an hour - it is not picked as a target and the
+            // grind destinations for it drop (the same per-bot list the unreachable give-up
+            // uses) - instead of walking back into it. Measured before: one mage died seven
+            // times in 37 minutes to Razormane Thornweavers, a hunter five times to Prairie
+            // Stalkers; 18 of 83 dead bots had three or more deaths in 22 minutes.
+            if (lastKiller_.entry && context)
+            {
+                uint32 const nowMs = WorldTimer::getMSTime();
+                if (lastKiller_.entry == prevKillerEntry_ && nowMs - prevKillerMs_ <= 15 * MINUTE * IN_MILLISECONDS)
+                {
+                    context->GetValue<std::map<uint32, uint32>&>("unreachable entries")->Get()[lastKiller_.entry] = nowMs + 30 * MINUTE * IN_MILLISECONDS;
+                    TellDebug(GetMaster(), "Leaving " + lastKiller_.name + " alone for a while - it killed me twice", "debug move");
+                    if (sPlayerbotAIConfig.hasLog("unreachable_targets.csv"))
+                    {
+                        time_t const nowLethal = time(nullptr);
+                        char stampLethal[32];
+                        strftime(stampLethal, sizeof(stampLethal), "%Y-%m-%d %H:%M:%S", localtime(&nowLethal));
+                        std::ostringstream outLethal;
+                        outLethal << stampLethal << "," << bot->GetName() << "," << bot->GetLevel() << ",LETHAL " << lastKiller_.name << "," << lastKiller_.level << ",lethal";
+                        sPlayerbotAIConfig.log("unreachable_targets.csv", outLethal.str().c_str());
+                    }
+                }
+                prevKillerEntry_ = lastKiller_.entry;
+                prevKillerMs_ = nowMs;
+            }
 
             // Determine accurate killer name & level
             std::string killerName;

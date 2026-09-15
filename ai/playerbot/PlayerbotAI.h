@@ -701,7 +701,10 @@ public:
         uint32 level = 0;
         bool isEnvironment = false;
         uint32 time = 0;
+        uint32 entry = 0;       // creature entry, 0 for players and the environment
     };
+    uint32 prevKillerEntry_ = 0; // the kind that killed the bot before (lethal-kind rule in OnDeath)
+    uint32 prevKillerMs_ = 0;
     void SetLastKiller(Unit* killer);
     const LastKillerInfo& GetLastKiller() const { return lastKiller_; }
     void ClearLastKiller() { lastKiller_ = LastKillerInfo(); }

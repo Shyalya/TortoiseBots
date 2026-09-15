@@ -469,9 +469,25 @@ bool AttackersValue::IgnoreTarget(Unit* target, Player* playerToCheckAgainst)
     auto givenUp = unreachable.find(target->getObjectGuid());
     if (givenUp != unreachable.end())
     {
-        if (WorldTimer::getMSTime() < givenUp->second && target->GetVictim() != playerToCheckAgainst)
+        if (WorldTimer::getMSTime() < givenUp->second &&
+            (target->GetVictim() != playerToCheckAgainst || !playerToCheckAgainst->IsWithinLOSInMap(target, true)))
             return true;
         unreachable.erase(givenUp);
+    }
+
+    // The same for the kind of creature: after a give-up the bot leaves that kind alone for
+    // a while, so a spot full of them is not given up on one creature at a time.
+    if (target->IsCreature())
+    {
+        std::map<uint32, uint32>& unreachableKinds = context->GetValue<std::map<uint32, uint32>&>("unreachable entries")->Get();
+        auto givenUpKind = unreachableKinds.find(target->GetEntry());
+        if (givenUpKind != unreachableKinds.end())
+        {
+            if (WorldTimer::getMSTime() < givenUpKind->second &&
+                (target->GetVictim() != playerToCheckAgainst || !playerToCheckAgainst->IsWithinLOSInMap(target, true)))
+                return true;
+            unreachableKinds.erase(givenUpKind);
+        }
     }
 
     // A creature that stands in a capital city is no grind target. Gamon and his kind are

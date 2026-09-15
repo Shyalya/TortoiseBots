@@ -117,6 +117,21 @@ namespace ai
         std::map<ObjectGuid, uint32> data;
     };
 
+    // The kinds (creature entries) a reach action gave up on, mapped to the time (ms) until
+    // which the bot leaves that kind alone. A spot full of the same creatures - a mine full
+    // of kobolds - was otherwise given up on one creature at a time (measured: one bot gave
+    // up on Kobold Worker 72 times in an hour and never left the hill). Honoured by
+    // AttackersValue::IgnoreTarget and by GrindTravelDestination::IsActive, so the grind
+    // destination for that kind drops too and the bot moves on.
+    class UnreachableEntriesValue : public ManualSetValue<std::map<uint32, uint32>& >
+    {
+    public:
+        UnreachableEntriesValue(PlayerbotAI* ai) : ManualSetValue<std::map<uint32, uint32>& >(ai, data, "unreachable entries") {}
+
+    private:
+        std::map<uint32, uint32> data;
+    };
+
     class TalkTargetValue : public ManualSetValue<ObjectGuid>
     {
     public:
