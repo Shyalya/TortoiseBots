@@ -17,6 +17,7 @@
 #include "SharedDefines.h"
 #include "Database/DBCStores.h"
 #include "Util.h"
+#include "Timer.h"
 #include "../host/ModuleLog.h"
 
 #if __has_include("Handlers/CharacterCreation.h")
@@ -199,7 +200,7 @@ void RandomBotService::LoadCandidates()
     for (uint32 accountId : accountIds)
     {
         std::unique_ptr<QueryResult> characters(CharacterDatabase.PQuery(
-            "SELECT guid FROM characters WHERE account = '%u' ORDER BY guid", accountId));
+            "SELECT guid, level, race FROM characters WHERE account = '%u' ORDER BY guid", accountId));
         if (!characters)
             continue;
 
@@ -210,7 +211,12 @@ void RandomBotService::LoadCandidates()
             if (!guidLow || !characterIds.insert(guidLow).second)
                 continue;
 
-            m_candidates.push_back({accountId, ObjectGuid(HIGHGUID_PLAYER, guidLow)});
+            Candidate candidate;
+            candidate.accountId = accountId;
+            candidate.characterGuid = ObjectGuid(HIGHGUID_PLAYER, guidLow);
+            candidate.level = std::max<uint8_t>(1, fields[1].GetUInt8());
+            candidate.team = Player::TeamForRace(fields[2].GetUInt8());
+            m_candidates.push_back(candidate);
         } while (characters->NextRow());
     }
 
@@ -804,11 +810,33 @@ void RandomBotService::RemoveExpiredBots(uint32_t diff)
     for (size_t i = 0; i < m_candidates.size(); ++i)
     {
         Candidate const& candidate = m_candidates[i];
+        if (m_wasBot.size() != m_candidates.size())
+            m_wasBot.resize(m_candidates.size(), 0);
         if (!BotManager::Instance().IsRandomBot(candidate.characterGuid))
         {
+            // Was a bot last interval and is gone within a minute of entering the world (or
+            // never entered it): whatever threw it out - a saved stun, a bad spot, a refused
+            // login - will do so again, so the level ladder does not pick it again for an
+            // hour instead of every interval.
+            if (sPlayerbotAIConfig.levelLadder && m_wasBot[i] && m_ageMs[i] < 60000)
+            {
+                if (m_ladderRetryMs.size() != m_candidates.size())
+                    m_ladderRetryMs.resize(m_candidates.size(), 0);
+                uint32_t nowMs = WorldTimer::getMSTime();
+                m_ladderRetryMs[i] = nowMs + 3600000;
+                ++m_quickLogouts;
+                if (nowMs - m_quickLogoutLogMs >= 60000)
+                {
+                    m_quickLogoutLogMs = nowMs;
+                    TB_LOG_BASIC("TortoiseBots: level ladder: %s (level %u) left %u ms after entering the world - set aside for an hour (%u such quick logouts so far)",
+                        candidate.characterGuid.GetString().c_str(), uint32(candidate.level), m_ageMs[i], m_quickLogouts);
+                }
+            }
+            m_wasBot[i] = 0;
             m_ageMs[i] = 0;
             continue;
         }
+        m_wasBot[i] = 1;
 
         BotRecord* record = BotManager::Instance().FindBot(candidate.characterGuid);
         if (!record || !record->enteredWorld)
@@ -838,6 +866,135 @@ void RandomBotService::RemoveExpiredBots(uint32_t diff)
         BotActivityLeaseManager::Instance().Release(candidate.characterGuid.GetCounter(), BotActivity::Grinding);
         m_ageMs[i] = 0;
     }
+}
+
+// ---- Level ladder ----------------------------------------------------------
+// The levels are cut into bands of LevelLadderBandSize (1-5, 6-10, ..., 56-59) plus level 60
+// on its own. Every low band gets an equal share of the online target, level 60 gets
+// LevelLadderMaxLevelShare percent of it; that share is a hard cap for the 60s, the rest of
+// them stays offline as a reserve for other uses of the characters.
+uint32_t RandomBotService::LadderBandCount() const
+{
+    uint32_t size = std::max<uint32_t>(1, sPlayerbotAIConfig.levelLadderBandSize);
+    return (59 + size - 1) / size + 1;
+}
+
+uint32_t RandomBotService::LadderBandOf(uint32_t level) const
+{
+    if (level >= 60)
+        return LadderBandCount() - 1;
+    uint32_t size = std::max<uint32_t>(1, sPlayerbotAIConfig.levelLadderBandSize);
+    return (std::max<uint32_t>(1, level) - 1) / size;
+}
+
+std::string RandomBotService::LadderBandName(uint32_t band) const
+{
+    if (band + 1 >= LadderBandCount())
+        return "60";
+    uint32_t size = std::max<uint32_t>(1, sPlayerbotAIConfig.levelLadderBandSize);
+    uint32_t lo = band * size + 1, hi = std::min<uint32_t>(59, lo + size - 1);
+    return std::to_string(lo) + "-" + std::to_string(hi);
+}
+
+uint32_t RandomBotService::LadderBandTarget(uint32_t band) const
+{
+    uint32_t bands = LadderBandCount();
+    uint32_t sixty = m_targetCount * std::min<uint32_t>(100, sPlayerbotAIConfig.levelLadderMaxLevelSharePct) / 100;
+    if (band + 1 >= bands)
+        return sixty;
+    uint32_t rest = m_targetCount - sixty, low = bands - 1;
+    return rest / low + (band < rest % low ? 1 : 0);
+}
+
+// One pass = one sorted list per band of the offline candidates (highest level first, ring
+// order among equals so they take turns), built once per service interval. The first version
+// rescanned all candidates for every pick, which is quadratic when the target stays short
+// (a slow login pipeline) - measured as a world tick of 120 ms instead of 50 at 300 bots.
+void RandomBotService::LadderBuildBuckets(std::vector<std::vector<size_t>>& buckets, uint32_t nowMs) const
+{
+    size_t n = m_candidates.size();
+    buckets.assign(LadderBandCount(), std::vector<size_t>());
+    for (size_t k = 0; k < n; ++k)
+    {
+        size_t i = (m_nextCandidate + k) % n;
+        if (i < m_ladderRetryMs.size() && m_ladderRetryMs[i] && nowMs < m_ladderRetryMs[i])
+            continue;
+        Candidate const& c = m_candidates[i];
+        if (BotManager::Instance().IsBot(c.characterGuid))
+            continue;
+        buckets[LadderBandOf(c.level)].push_back(i);
+    }
+    for (auto& bucket : buckets)
+        std::stable_sort(bucket.begin(), bucket.end(), [this](size_t a, size_t b) { return m_candidates[a].level > m_candidates[b].level; });
+}
+
+// The band with the largest shortfall that still has offline characters; once every band is
+// covered, the highest level across the bands (the overflow goes to the leaders). Inside a
+// band the highest level, at equal level the faction with fewer bots online. A level-60
+// character is only taken while its band is short (hard cap). Returns the index or -1.
+int RandomBotService::LadderPickFromBuckets(std::vector<std::vector<size_t>>& buckets, std::vector<uint32_t> const& onlinePerBand, uint32_t onlineAlliance, uint32_t onlineHorde) const
+{
+    uint32_t bands = LadderBandCount();
+    int bestBand = -1;
+    int64_t bestShort = 0;
+    uint32_t bestLevel = 0;
+    for (uint32_t b = 0; b < bands; ++b)
+    {
+        if (buckets[b].empty())
+            continue;
+        int64_t shortfall = int64_t(LadderBandTarget(b)) - int64_t(onlinePerBand[b]);
+        if (b + 1 == bands && shortfall <= 0)
+            continue;
+        int64_t s = std::max<int64_t>(0, shortfall);
+        uint32_t level = m_candidates[buckets[b].front()].level;
+        if (bestBand < 0 || s > bestShort || (s == bestShort && level > bestLevel))
+        {
+            bestBand = static_cast<int>(b);
+            bestShort = s;
+            bestLevel = level;
+        }
+    }
+    if (bestBand < 0)
+        return -1;
+    std::vector<size_t>& bucket = buckets[bestBand];
+    size_t pos = 0;
+    uint32_t preferred = onlineHorde < onlineAlliance ? HORDE : (onlineAlliance < onlineHorde ? ALLIANCE : 0);
+    if (preferred)
+        for (size_t k = 0; k < bucket.size() && k < 64 && m_candidates[bucket[k]].level == bestLevel; ++k)
+            if (m_candidates[bucket[k]].team == preferred)
+            {
+                pos = k;
+                break;
+            }
+    size_t index = bucket[pos];
+    bucket.erase(bucket.begin() + pos);
+    return static_cast<int>(index);
+}
+
+void RandomBotService::LadderLog(uint32_t diff)
+{
+    m_ladderLogMs += diff;
+    uint32_t every = std::max<uint32_t>(1, sPlayerbotAIConfig.levelLadderLogMinutes) * 60 * 1000;
+    if (m_ladderLogMs < every)
+        return;
+    m_ladderLogMs = 0;
+    uint32_t bands = LadderBandCount();
+    std::vector<uint32_t> online(bands, 0), pool(bands, 0);
+    uint32_t reserve = 0, maxLevel = 0;
+    for (Candidate const& c : m_candidates)
+    {
+        uint32_t band = LadderBandOf(c.level);
+        ++pool[band];
+        maxLevel = std::max<uint32_t>(maxLevel, c.level);
+        if (BotManager::Instance().IsRandomBot(c.characterGuid))
+            ++online[band];
+        else
+            ++reserve;
+    }
+    std::string line;
+    for (uint32_t b = 0; b < bands; ++b)
+        line += (b ? " " : "") + LadderBandName(b) + ":" + std::to_string(online[b]) + "/" + std::to_string(LadderBandTarget(b)) + "(" + std::to_string(pool[b]) + ")";
+    TB_LOG_BASIC("TortoiseBots: level ladder online/target(pool) per band %s | reserve %u, highest level %u", line.c_str(), reserve, maxLevel);
 }
 
 void RandomBotService::MaintainOnlinePool()
@@ -914,6 +1071,89 @@ void RandomBotService::MaintainOnlinePool()
         }
     }
 
+    if (sPlayerbotAIConfig.levelLadder)
+    {
+        // Level ladder: instead of the ring over the whole pool, fill the level band with the
+        // largest shortfall first and take the highest-level character inside it, so the field
+        // spreads over the levels and the leaders keep playing until 60. One sorted pass per
+        // interval; a candidate that cannot log in right now (session still closing, lease held,
+        // add refused) is left alone for a minute instead of being picked again every interval.
+        uint32_t const nowMs = WorldTimer::getMSTime();
+        if (m_ladderRetryMs.size() != m_candidates.size())
+            m_ladderRetryMs.resize(m_candidates.size(), 0);
+        std::vector<uint32_t> onlinePerBand(LadderBandCount(), 0);
+        uint32_t onlineAlliance = 0, onlineHorde = 0;
+        for (Candidate const& c : m_candidates)
+        {
+            if (!BotManager::Instance().IsRandomBot(c.characterGuid))
+                continue;
+            ++onlinePerBand[LadderBandOf(c.level)];
+            if (c.team == HORDE) ++onlineHorde; else ++onlineAlliance;
+        }
+        std::vector<std::vector<size_t>> buckets;
+        LadderBuildBuckets(buckets, nowMs);
+        uint32_t eligible = 0, sessionBusy = 0, leaseBusy = 0, addFailed = 0;
+        for (auto const& bucket : buckets)
+            eligible += static_cast<uint32_t>(bucket.size());
+        size_t ladderAttempts = 0, maxAttempts = static_cast<size_t>(perInterval) * 4;
+        while (online < m_targetCount && added < perInterval && ladderAttempts < maxAttempts)
+        {
+            ++ladderAttempts;
+            int picked = LadderPickFromBuckets(buckets, onlinePerBand, onlineAlliance, onlineHorde);
+            if (picked < 0)
+                break;
+            size_t index = static_cast<size_t>(picked);
+            Candidate const& candidate = m_candidates[index];
+            if (Player* player = sObjectAccessor.FindPlayer(candidate.characterGuid))
+            {
+                // A network session owns the character; never steal it.
+                if (!player->GetSession() || !player->GetSession()->IsHeadless())
+                {
+                    m_ladderRetryMs[index] = nowMs + 60000;
+                    ++sessionBusy;
+                    continue;
+                }
+            }
+            if (BotSessionAdapter::GetHeadlessSessionState(candidate.characterGuid) != HeadlessSessionState::NotFound)
+            {
+                m_ladderRetryMs[index] = nowMs + 60000;
+                ++sessionBusy;
+                continue;
+            }
+            uint32 guidLow = candidate.characterGuid.GetCounter();
+            if (!BotActivityLeaseManager::Instance().TryAcquire(guidLow, BotActivity::Grinding, 0))
+            {
+                m_ladderRetryMs[index] = nowMs + 60000;
+                ++leaseBusy;
+                continue;
+            }
+            if (BotManager::Instance().AddRandomBot(candidate.accountId, candidate.characterGuid))
+            {
+                ++online;
+                ++added;
+                ++onlinePerBand[LadderBandOf(candidate.level)];
+                if (candidate.team == HORDE) ++onlineHorde; else ++onlineAlliance;
+                TB_LOG_DETAIL("TortoiseBots: level ladder queued random bot %s (level %u, band %s) on account %u",
+                    candidate.characterGuid.GetString().c_str(), uint32(candidate.level),
+                    LadderBandName(LadderBandOf(candidate.level)).c_str(), candidate.accountId);
+            }
+            else
+            {
+                BotActivityLeaseManager::Instance().Release(guidLow, BotActivity::Grinding);
+                m_ladderRetryMs[index] = nowMs + 60000;
+                ++addFailed;
+            }
+        }
+        ++m_nextCandidate; // equals take turns across passes
+        if (online < m_targetCount && nowMs - m_ladderPassLogMs >= 60000)
+        {
+            m_ladderPassLogMs = nowMs;
+            TB_LOG_BASIC("TortoiseBots: level ladder pass: online %u/%u, added %u, offline eligible %u, skipped: session %u, lease %u, add refused %u",
+                online, m_targetCount, added, eligible, sessionBusy, leaseBusy, addFailed);
+        }
+        return;
+    }
+
     size_t attempts = 0;
     while (online < m_targetCount && added < perInterval && attempts < m_candidates.size())
     {
@@ -982,6 +1222,8 @@ void RandomBotService::Update(uint32_t diff)
     if (!m_pinnedResolved)
         ResolvePinnedBots();
     RemoveExpiredBots(elapsed);
+    if (sPlayerbotAIConfig.levelLadder)
+        LadderLog(elapsed);
 
     for (size_t i = 0; i < m_candidates.size(); ++i)
     {
@@ -990,6 +1232,9 @@ void RandomBotService::Update(uint32_t diff)
         Player* player = sObjectAccessor.FindPlayer(candidate.characterGuid);
         if (!record || !record->enteredWorld || !player)
             continue;
+
+        // Keep the cached level current for the level ladder (a level-up while online).
+        m_candidates[i].level = static_cast<uint8_t>(std::max<uint32>(1, player->GetLevel()));
 
         // Recovery/expired-value work stays on the world thread and is bounded
         // by the configured service cadence rather than a second AI loop.

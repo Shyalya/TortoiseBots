@@ -267,6 +267,13 @@ bool PlayerbotAIConfig::Initialize()
     randomBotUpdateInterval = config.GetIntDefault("AiPlayerbot.RandomBotUpdateInterval", 1 * 1000);
     randomBotTimedLogout = config.GetBoolDefault("AiPlayerbot.RandomBotTimedLogout", true);
     randomBotTimedOffline = config.GetBoolDefault("AiPlayerbot.RandomBotTimedOffline", false);
+    levelLadder = config.GetBoolDefault("AiPlayerbot.LevelLadder", false);
+    levelLadderBandSize = config.GetIntDefault("AiPlayerbot.LevelLadderBandSize", 5);
+    if (levelLadderBandSize < 1) levelLadderBandSize = 1;
+    if (levelLadderBandSize > 59) levelLadderBandSize = 59;
+    levelLadderMaxLevelSharePct = config.GetIntDefault("AiPlayerbot.LevelLadderMaxLevelShare", 10);
+    if (levelLadderMaxLevelSharePct > 100) levelLadderMaxLevelSharePct = 100;
+    levelLadderLogMinutes = config.GetIntDefault("AiPlayerbot.LevelLadderLogMinutes", 5);
     minRandomBotInWorldTime = config.GetIntDefault("AiPlayerbot.MinRandomBotInWorldTime", 1 * 1800);
     maxRandomBotInWorldTime = config.GetIntDefault("AiPlayerbot.MaxRandomBotInWorldTime", 6 * 3600);
     minRandomBotRandomizeTime = config.GetIntDefault("AiPlayerbot.MinRandomBotRandomizeTime", 6 * 3600);

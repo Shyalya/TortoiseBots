@@ -33,6 +33,8 @@ private:
     {
         uint32_t accountId = 0;
         ObjectGuid characterGuid;
+        uint8_t level = 1;      // from the characters table at load, refreshed while online
+        uint32_t team = 0;      // Team enum from the race (ALLIANCE / HORDE)
     };
 
     RandomBotService() = default;
@@ -40,6 +42,14 @@ private:
 
     void LoadCandidates();
     void MaintainOnlinePool();
+    // Level ladder (AiPlayerbot.LevelLadder), see MaintainOnlinePool.
+    uint32_t LadderBandCount() const;
+    uint32_t LadderBandOf(uint32_t level) const;
+    uint32_t LadderBandTarget(uint32_t band) const;
+    std::string LadderBandName(uint32_t band) const;
+    void LadderBuildBuckets(std::vector<std::vector<size_t>>& buckets, uint32_t nowMs) const;
+    int LadderPickFromBuckets(std::vector<std::vector<size_t>>& buckets, std::vector<uint32_t> const& onlinePerBand, uint32_t onlineAlliance, uint32_t onlineHorde) const;
+    void LadderLog(uint32_t diff);
     void RemoveExpiredBots(uint32_t diff);
     uint32_t TargetCount() const;
     uint32_t DesiredTargetCount() const;
@@ -57,6 +67,12 @@ private:
     std::vector<uint32_t> m_strategyAgeMs;
     std::vector<uint32_t> m_randomizeAgeMs;
     size_t m_nextCandidate = 0;
+    uint32_t m_ladderLogMs = 0;
+    uint32_t m_ladderPassLogMs = 0;
+    std::vector<uint32_t> m_ladderRetryMs; // per candidate: not picked again before this time (failed / busy)
+    uint32_t m_quickLogouts = 0;           // bots that left within a minute of logging in (diagnostic)
+    std::vector<uint8_t> m_wasBot;         // per candidate: was a random bot at the last service interval
+    uint32_t m_quickLogoutLogMs = 0;
     uint32_t m_serviceElapsedMs = 0;
     // Stable target: snapshot of DesiredTargetCount once at Initialize when
     // auto-create is enabled (no per-cadence re-roll/ratchet toward Max). For
